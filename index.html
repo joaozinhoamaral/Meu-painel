@@ -371,6 +371,21 @@ function App(){
     showToast("Registro removido",true);
   };
 
+  const removeLastEntry=(catKey,itemId,month)=>{
+    const it=(data.items[catKey]||[]).find(x=>x.id===itemId);
+    if(!it) return;
+    const inMonth=(it.entries||[]).filter(e=>monthOf(e.date)===month&&yearOfISO(e.date)===viewYear);
+    if(!inMonth.length){ showToast("Nenhum registro neste mês"); return; }
+    const last=[...inMonth].sort((a,b)=>b.date.localeCompare(a.date))[0];
+    pushHistory(data);
+    updateItems(catKey,items=>items.map(it2=>{
+      if(it2.id!==itemId) return it2;
+      const m=monthOf(last.date);
+      return {...it2,entries:it2.entries.filter(e=>e.id!==last.id),monthlyData:it2.monthlyData.map((v,i)=>i===m?Math.max(0,v-1):v)};
+    }));
+    showToast("−1 removido",true);
+  };
+
   const addItem=(catKey)=>{
     if(!newItemName.trim()) return;
     updateItems(catKey,items=>[...items,makeItem(`c_${Date.now()}`,newItemName.trim())]);
@@ -791,6 +806,13 @@ function App(){
                         <button onClick={()=>{setExpandedId(expanded?null:item.id);setLogSearch("");}}
                           style={{height:30,padding:"0 7px",borderRadius:6,background:expanded?cBg:C.bg,border:`1px solid ${expanded?cat.color:C.border}`,color:expanded?cat.color:C.textSoft,fontSize:10,cursor:"pointer",display:"flex",alignItems:"center",gap:3,whiteSpace:"nowrap"}}>
                           📋 {monthVal}
+                        </button>
+                        <button
+                          onClick={()=>removeLastEntry(activeTab,item.id,selMonth)}
+                          disabled={monthVal===0}
+                          title="Remover último registro deste mês"
+                          style={{width:42,height:42,borderRadius:10,background:monthVal===0?"transparent":C.bg,border:`2px solid ${monthVal===0?C.borderSoft:C.border}`,color:monthVal===0?C.borderSoft:C.textSoft,fontSize:22,cursor:monthVal===0?"default":"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:"bold"}}>
+                          −
                         </button>
                         <button onClick={()=>{if(isPicking){setPickingFor(null);return;} setPickedDate(todayISO());setPickedNote("");setPickingFor({catKey:activeTab,itemId:item.id});setExpandedId(item.id);}}
                           style={{width:42,height:42,borderRadius:10,background:cBg,border:`2px solid ${cat.color}`,color:cat.color,fontSize:24,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:"bold"}}>
