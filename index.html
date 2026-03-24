@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+  <meta name="apple-mobile-web-app-title" content="Painel"/>
+  <meta name="theme-color" content="#1A56DB"/>
+  <link rel="manifest" href="/manifest.json"/>
+  <link rel="apple-touch-icon" href="/icon-192.png"/>
+  <title>Meu Painel</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; background: #F4F6F9; font-family: Georgia, 'Times New Roman', serif; }
+    body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    ::-webkit-scrollbar { display: none; }
+    button { -webkit-appearance: none; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ─── Tema ─────────────────────────────────────────────────────────────────────
+const C = {
+  bg:"#F4F6F9", surface:"#FFFFFF", border:"#D8DCE5", borderSoft:"#E8EBF2",
+  text:"#111827", textMid:"#374151", textSoft:"#6B7280", textMuted:"#9CA3AF",
+};
+
+const CATEGORIES = {
+  cirurgias: { short:"Cirurgias", label:"Cirurgias & Procedimentos", color:"#1A56DB", colorBg:"#EBF0FD", colorMuted:"#93B4F5" },
+  consultas: { short:"Consultas", label:"Consultas",                 color:"#0B7B5A", colorBg:"#E6F5EF", colorMuted:"#5DC4A1" },
+  habitos:   { short:"Hábitos",   label:"Hábitos Diários",           color:"#B45309", colorBg:"#FDF3E3", colorMuted:"#F0A44A" },
+};
+
+const MONTHS   = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+const WEEKDAYS = ["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"];
+const YEAR     = new Date().getFullYear();
+const TODAY_M  = new Date().getMonth();
+const TODAY_D  = new Date().getDate();
+
+const todayISO  = () => new Date().toISOString().slice(0,10);
+const fmtDate   = (iso) => { const [y,m,d]=iso.split("-"); return `${d}/${m}/${y}`; };
+const weekdayOf = (iso) => WEEKDAYS[new Date(iso+"T12:00:00").getDay()];
+const monthOf   = (iso) => parseInt(iso.split("-")[1],10)-1;
+
+const makeItem    = (id,name) => ({id,name,entries:[],monthlyData:Array(12).fill(0)});
+const migrateItem = (it) => ({...it,entries:it.entries||[],monthlyData:it.monthlyData||Array(12).fill(0)});
+
+const DEFAULT_COUNTERS = {
+  cirurgias:[makeItem("safenectomia","Safenectomia / EVLA"),makeItem("escleroterapia","Escleroterapia"),makeItem("laser_trans","Laser Transdérmico"),makeItem("flebectomia","Flebectomia")],
+  consultas:[makeItem("consulta_nova","Consultas Novas"),makeItem("retorno","Retornos")],
+  habitos:  [makeItem("academia","Academia"),makeItem("leitura","Leitura")],
+};
+
+const storageKey = (y) => `painel_data_${y}`;
+
+// ─── Storage (localStorage) ───────────────────────────────────────────────────
+const lsGet = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+const lsSet = (key,val) => { try { localStorage.setItem(key,val); } catch {} };
+
+// ─── Export CSV ───────────────────────────────────────────────────────────────
+function exportCSV(data, year) {
+  const rows = [["Data","Dia da Semana","Categoria","Item"]];
+  for (const [catKey,items] of Object.entries(data)) {
+    const label = CATEGORIES[catKey]?.label || catKey;
+    for (const item of items)
+      for (const e of (item.entries||[]))
+        rows.push([fmtDate(e.date), weekdayOf(e.date), label, item.name]);
+  }
+  rows.slice(1).sort((a,b) => a[0] > b[0] ? -1 : 1);
+  const csv = rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
+  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8"});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href=url; a.download=`painel_${year}.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+function App() {
+  const [data,          setData]          = useState(null);
+  const [prevYearData,  setPrevYearData]  = useState(null);
+  const [activeTab,     setActiveTab]     = useState("cirurgias");
+  const [selectedMonth, setSelectedMonth] = useState(TODAY_M);
+  const [toast,         setToast]         = useState(null);
+  const [addingNew,     setAddingNew]     = useState(false);
+  const [newName,       setNewName]       = useState("");
+  const [view,          setView]          = useState("month");
+  const [expandedId,    setExpandedId]    = useState(null);
+  const [pickingDate,   setPickingDate]   = useState(null);
+  const [pickedDate,    setPickedDate]    = useState(todayISO());
+  const [showExport,    setShowExport]    = useState(false);
+
+  const migrate = (raw) => {
+    const m={};
+    for(const[k,arr] of Object.entries(raw)) m[k]=arr.map(migrateItem);
+    return m;
+  };
+
+  useEffect(() => {
+    const raw = lsGet(storageKey(YEAR));
+    setData(raw ? migrate(JSON.parse(raw)) : DEFAULT_COUNTERS);
+    const raw2 = lsGet(storageKey(YEAR-1));
+    if(raw2) setPrevYearData(migrate(JSON.parse(raw2)));
+  }, []);
+
+  const save = useCallback((d) => {
+    lsSet(storageKey(YEAR), JSON.stringify(d));
+  }, []);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(()=>setToast(null),1500); };
+
+  const update = (catKey, fn) => {
+    const updated = {...data,[catKey]:fn(data[catKey])};
+    setData(updated); save(updated);
+  };
+
+  const addEntry = (catKey, itemId, date) => {
+    const m = monthOf(date);
+    update(catKey, items => items.map(it => {
+      if(it.id!==itemId) return it;
+      const entries=[...it.entries,{id:`e_${Date.now()}_${Math.random().toString(36).slice(2)}`,date}];
+      const monthlyData=it.monthlyData.map((v,i)=>i===m?v+1:v);
+      return {...it,entries,monthlyData};
+    }));
+    showToast(`+1 em ${fmtDate(date)}`);
+  };
+
+  const removeEntry = (catKey, itemId, entryId) => {
+    update(catKey, items => items.map(it => {
+      if(it.id!==itemId) return it;
+      const removed=it.entries.find(e=>e.id===entryId);
+      if(!removed) return it;
+      const m=monthOf(removed.date);
+      return {...it,entries:it.entries.filter(e=>e.id!==entryId),monthlyData:it.monthlyData.map((v,i)=>i===m?Math.max(0,v-1):v)};
+    }));
+    showToast("Registro removido");
+  };
+
+  const addItem   = (catKey) => { if(!newName.trim()) return; update(catKey,items=>[...items,makeItem(`custom_${Date.now()}`,newName.trim())]); setNewName(""); setAddingNew(false); };
+  const removeItem= (catKey,id) => { update(catKey,items=>items.filter(it=>it.id!==id)); if(expandedId===id) setExpandedId(null); };
+  const moveItem  = (catKey,idx,dir) => { update(catKey,items=>{ const arr=[...items],to=idx+dir; if(to<0||to>=arr.length) return arr; [arr[idx],arr[to]]=[arr[to],arr[idx]]; return arr; }); };
+
+  const totalYear       = (item) => (item.monthlyData||[]).reduce((a,b)=>a+b,0);
+  const entriesForMonth = (item,m) => (item.entries||[]).filter(e=>monthOf(e.date)===m).sort((a,b)=>b.date.localeCompare(a.date));
+  const entriesToday    = (item) => (item.entries||[]).filter(e=>e.date===todayISO());
+
+  const dailySummary = data ? Object.entries(CATEGORIES).flatMap(([catKey,c]) =>
+    (data[catKey]||[]).flatMap(item =>
+      entriesToday(item).map(()=>({catKey,catColor:c.color,catBg:c.colorBg,itemName:item.name}))
+    )
+  ) : [];
+
+  if(!data) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:C.bg,color:C.textSoft,fontFamily:"Georgia,serif"}}>Carregando…</div>;
+
+  const cat  = CATEGORIES[activeTab];
+  const items = data[activeTab]||[];
+  const totalCatYear  = items.reduce((a,it)=>a+totalYear(it),0);
+  const totalCatMonth = items.reduce((a,it)=>a+(it.monthlyData[selectedMonth]||0),0);
+
+  const compareData = (() => {
+    const curr = data[activeTab]||[];
+    const prev = prevYearData?(prevYearData[activeTab]||[]):[];
+    return MONTHS.map((m,i)=>({
+      month:m,
+      curr:curr.reduce((a,it)=>a+(it.monthlyData[i]||0),0),
+      prev:prev.reduce((a,it)=>a+(it.monthlyData[i]||0),0),
+    }));
+  })();
+  const compareMax = Math.max(...compareData.flatMap(d=>[d.curr,d.prev]),1);
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,fontFamily:"Georgia,'Times New Roman',serif",paddingBottom:56,maxWidth:480,margin:"0 auto"}}>
+
+      {/* Header */}
+      <div style={{background:C.surface,padding:"20px 20px 14px",borderBottom:`1px solid ${C.border}`}}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:11,letterSpacing:3,color:C.textMuted,textTransform:"uppercase",marginBottom:3}}>{YEAR}</div>
+            <div style={{fontSize:24,color:C.text}}>Meu Painel</div>
+            <div style={{fontSize:12,color:C.textSoft,letterSpacing:2,textTransform:"uppercase",marginTop:3}}>Cirurgias · Consultas · Hábitos</div>
+          </div>
+          <button onClick={()=>setShowExport(v=>!v)}
+            style={{marginTop:4,padding:"7px 13px",background:showExport?C.borderSoft:"transparent",border:`1px solid ${C.border}`,borderRadius:8,color:C.textSoft,fontSize:12,cursor:"pointer",fontFamily:"Georgia,serif",display:"flex",alignItems:"center",gap:5}}>
+            ↓ Exportar
+          </button>
+        </div>
+        {showExport && (
+          <div style={{marginTop:12,padding:"12px",background:C.bg,borderRadius:8,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:12,color:C.textSoft,marginBottom:10}}>Exportar todos os registros de <strong>{YEAR}</strong> com data, dia, categoria e item.</div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{exportCSV(data,YEAR);setShowExport(false);showToast("CSV exportado!");}}
+                style={{flex:1,padding:"8px",background:C.text,border:"none",borderRadius:7,color:"#fff",fontSize:13,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:"bold"}}>
+                📊 Baixar CSV
+              </button>
+              <button onClick={()=>window.print()}
+                style={{flex:1,padding:"8px",background:"transparent",border:`1px solid ${C.border}`,borderRadius:7,color:C.textMid,fontSize:13,cursor:"pointer",fontFamily:"Georgia,serif"}}>
+                🖨️ Imprimir
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Widget do dia */}
+      <div style={{margin:"10px 16px 0",background:C.surface,borderRadius:10,border:`1px solid ${C.border}`,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}>
+        <div style={{padding:"10px 14px 8px",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:`1px solid ${C.borderSoft}`}}>
+          <div>
+            <span style={{fontSize:13,fontWeight:"bold",color:C.text}}>{WEEKDAYS[new Date().getDay()]}, {TODAY_D} de {MONTHS[TODAY_M]}</span>
+            <span style={{fontSize:12,color:C.textMuted,marginLeft:8}}>Hoje</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:dailySummary.length>0?"#22C55E":"#D1D5DB"}}/>
+            <span style={{fontSize:13,color:dailySummary.length>0?"#15803D":C.textMuted}}>
+              {dailySummary.length} registro{dailySummary.length!==1?"s":""} hoje
+            </span>
+          </div>
+        </div>
+        {dailySummary.length===0
+          ? <div style={{padding:"10px 14px",fontSize:12,color:C.textMuted}}>Nenhum registro ainda. Use o <strong>+</strong> em qualquer item para registrar.</div>
+          : <div style={{padding:"8px 14px 10px",display:"flex",flexWrap:"wrap",gap:6}}>
+              {dailySummary.map((s,i)=>(
+                <div key={i} style={{padding:"3px 10px",borderRadius:20,background:s.catBg,border:`1px solid ${s.catColor}33`,fontSize:12,color:s.catColor}}>{s.itemName}</div>
+              ))}
+            </div>
+        }
+      </div>
+
+      {/* Tabs de categoria */}
+      <div style={{display:"flex",gap:8,padding:"10px 16px",overflowX:"auto",marginTop:6}}>
+        {Object.entries(CATEGORIES).map(([key,c])=>{
+          const active=activeTab===key;
+          return(
+            <button key={key} onClick={()=>{setActiveTab(key);setExpandedId(null);setAddingNew(false);setPickingDate(null);}}
+              style={{flex:"0 0 auto",padding:"7px 18px",borderRadius:20,cursor:"pointer",fontFamily:"Georgia,serif",fontSize:13,whiteSpace:"nowrap",background:active?c.colorBg:C.surface,border:`1.5px solid ${active?c.color:C.border}`,color:active?c.color:C.textSoft,fontWeight:active?"bold":"normal"}}>
+              {c.short}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* View toggle */}
+      <div style={{display:"flex",margin:"0 16px 8px",background:C.borderSoft,borderRadius:8,padding:3,gap:3}}>
+        {[["month","Mensal"],["year","Anual"],["compare","Comparar"]].map(([v,label])=>(
+          <button key={v} onClick={()=>setView(v)}
+            style={{flex:1,padding:"7px 0",border:"none",borderRadius:6,cursor:"pointer",fontFamily:"Georgia,serif",fontSize:12,background:view===v?C.surface:"transparent",color:view===v?C.text:C.textSoft,fontWeight:view===v?"bold":"normal",boxShadow:view===v?"0 1px 4px rgba(0,0,0,0.08)":"none"}}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Month selector */}
+      {(view==="month"||view==="compare") && (
+        <div style={{display:"flex",gap:5,padding:"0 16px 8px",overflowX:"auto"}}>
+          {MONTHS.map((m,i)=>{
+            const sel=selectedMonth===i, today=i===TODAY_M&&!sel;
+            return(
+              <button key={i} onClick={()=>setSelectedMonth(i)}
+                style={{flex:"0 0 auto",padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:"Georgia,serif",fontSize:12,background:sel?cat.color:"transparent",border:`1px solid ${sel?cat.color:today?cat.colorMuted:C.border}`,color:sel?"#fff":today?cat.color:C.textSoft,fontWeight:sel?"bold":"normal"}}>
+                {m}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Summary strip */}
+      {view!=="compare" && (
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:32,padding:"12px 24px",background:C.surface,margin:"0 16px 8px",borderRadius:10,border:`1px solid ${C.border}`,boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}>
+          {view==="month" ? (<>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <span style={{fontSize:38,color:cat.color,lineHeight:1}}>{totalCatMonth}</span>
+              <span style={{fontSize:11,color:C.textSoft,letterSpacing:1.5,textTransform:"uppercase",marginTop:4}}>{MONTHS[selectedMonth]}</span>
+            </div>
+            <div style={{width:1,height:40,background:C.border}}/>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <span style={{fontSize:38,color:C.text,lineHeight:1}}>{totalCatYear}</span>
+              <span style={{fontSize:11,color:C.textSoft,letterSpacing:1.5,textTransform:"uppercase",marginTop:4}}>Total {YEAR}</span>
+            </div>
+          </>) : (
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <span style={{fontSize:38,color:cat.color,lineHeight:1}}>{totalCatYear}</span>
+              <span style={{fontSize:11,color:C.textSoft,letterSpacing:1.5,textTransform:"uppercase",marginTop:4}}>Total {YEAR}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ VIEW: COMPARAR ══ */}
+      {view==="compare" && (
+        <div style={{padding:"0 16px",display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{display:"flex",gap:16,padding:"8px 12px",background:C.surface,borderRadius:8,border:`1px solid ${C.border}`,fontSize:12,color:C.textSoft}}>
+            <div style={{display:"flex",alignItems:"center",gap:5}}>
+              <div style={{width:12,height:12,borderRadius:2,background:cat.color}}/> {YEAR}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:5}}>
+              <div style={{width:12,height:12,borderRadius:2,background:cat.colorMuted,opacity:0.6}}/> {YEAR-1} {!prevYearData&&"(sem dados)"}
+            </div>
+          </div>
+
+          <div style={{background:C.surface,borderRadius:10,border:`1px solid ${C.border}`,padding:"16px 12px 12px",boxShadow:"0 1px 4px rgba(0,0,0,0.04)"}}>
+            <div style={{fontSize:12,color:C.textSoft,marginBottom:12,fontWeight:"bold",letterSpacing:0.5}}>{cat.label.toUpperCase()}</div>
+            <div style={{display:"flex",gap:4,alignItems:"flex-end",height:90}}>
+              {compareData.map((d,i)=>{
+                const hC=compareMax>0?Math.round((d.curr/compareMax)*72)+2:2;
+                const hP=compareMax>0?Math.round((d.prev/compareMax)*72)+2:2;
+                const isSel=selectedMonth===i;
+                return(
+                  <div key={i} onClick={()=>setSelectedMonth(i)}
+                    style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-end",gap:1,cursor:"pointer",padding:"0 1px"}}>
+                    <div style={{width:"100%",display:"flex",gap:1,alignItems:"flex-end",justifyContent:"center"}}>
+                      <div style={{flex:1,height:`${hC}px`,borderRadius:"2px 2px 0 0",background:cat.color,opacity:isSel?1:0.75}}/>
+                      <div style={{flex:1,height:`${hP}px`,borderRadius:"2px 2px 0 0",background:cat.colorMuted,opacity:isSel?0.8:0.4}}/>
+                    </div>
+                    <div style={{fontSize:8,color:isSel?cat.color:C.textMuted,fontWeight:isSel?"bold":"normal"}}>{d.month.slice(0,1)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{background:C.surface,borderRadius:10,border:`1.5px solid ${cat.color}`,padding:"14px",boxShadow:`0 0 0 3px ${cat.colorBg}`}}>
+            <div style={{fontSize:12,color:cat.color,fontWeight:"bold",letterSpacing:0.5,marginBottom:12}}>{MONTHS[selectedMonth].toUpperCase()} — DETALHADO</div>
+            <div style={{display:"flex",gap:0,marginBottom:12}}>
+              <div style={{flex:1,textAlign:"center",padding:"8px 0",background:cat.colorBg,borderRadius:"8px 0 0 8px",border:`1px solid ${cat.colorMuted}`}}>
+                <div style={{fontSize:28,color:cat.color,lineHeight:1}}>{compareData[selectedMonth].curr}</div>
+                <div style={{fontSize:11,color:cat.color,marginTop:3,letterSpacing:1}}>{YEAR}</div>
+              </div>
+              <div style={{flex:1,textAlign:"center",padding:"8px 0",background:C.bg,borderRadius:"0 8px 8px 0",border:`1px solid ${C.border}`,borderLeft:"none"}}>
+                <div style={{fontSize:28,color:C.textMid,lineHeight:1}}>{compareData[selectedMonth].prev}</div>
+                <div style={{fontSize:11,color:C.textSoft,marginTop:3,letterSpacing:1}}>{YEAR-1}</div>
+              </div>
+            </div>
+            {(() => {
+              const delta=compareData[selectedMonth].curr-compareData[selectedMonth].prev;
+              const hasPrev=prevYearData&&compareData[selectedMonth].prev>0;
+              const pct=hasPrev?Math.round((delta/compareData[selectedMonth].prev)*100):null;
+              if(!hasPrev) return <div style={{fontSize:12,color:C.textMuted}}>Sem dados de {YEAR-1} para comparar.</div>;
+              return(
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:7,background:delta>=0?"#F0FDF4":"#FFF1F2",border:`1px solid ${delta>=0?"#86EFAC":"#FCA5A5"}`}}>
+                  <span style={{fontSize:18}}>{delta>=0?"▲":"▼"}</span>
+                  <div>
+                    <span style={{fontSize:14,fontWeight:"bold",color:delta>=0?"#15803D":"#B91C1C"}}>{delta>=0?"+":""}{delta} {delta>=0?"a mais":"a menos"}</span>
+                    {pct!==null&&<span style={{fontSize:12,color:delta>=0?"#166534":"#991B1B",marginLeft:6}}>({delta>=0?"+":""}{pct}% vs {YEAR-1})</span>}
+                  </div>
+                </div>
+              );
+            })()}
+            <div style={{marginTop:12,display:"flex",flexDirection:"column",gap:5}}>
+              {items.map(item=>{
+                const currVal=item.monthlyData[selectedMonth]||0;
+                const prevItem=prevYearData?((prevYearData[activeTab]||[]).find(it=>it.id===item.id)||null):null;
+                const prevVal=prevItem?(prevItem.monthlyData[selectedMonth]||0):null;
+                return(
+                  <div key={item.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.bg,borderRadius:7,border:`1px solid ${C.borderSoft}`}}>
+                    <div style={{flex:1,fontSize:13,color:C.text}}>{item.name}</div>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{fontSize:16,fontWeight:"bold",color:cat.color,minWidth:24,textAlign:"right"}}>{currVal}</span>
+                      {prevVal!==null&&<><span style={{fontSize:11,color:C.textMuted}}>vs</span><span style={{fontSize:14,color:C.textSoft,minWidth:24,textAlign:"right"}}>{prevVal}</span>{currVal!==prevVal&&<span style={{fontSize:11,color:currVal>prevVal?"#15803D":"#B91C1C"}}>{currVal>prevVal?"▲":"▼"}</span>}</>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{background:C.surface,borderRadius:10,border:`1px solid ${C.border}`,padding:"14px",display:"flex",gap:0}}>
+            <div style={{flex:1,textAlign:"center"}}>
+              <div style={{fontSize:11,color:C.textSoft,letterSpacing:1.5,textTransform:"uppercase",marginBottom:4}}>Jan–{MONTHS[selectedMonth]} {YEAR}</div>
+              <div style={{fontSize:30,color:cat.color}}>{compareData.slice(0,selectedMonth+1).reduce((a,d)=>a+d.curr,0)}</div>
+            </div>
+            <div style={{width:1,background:C.border,margin:"0 8px"}}/>
+            <div style={{flex:1,textAlign:"center"}}>
+              <div style={{fontSize:11,color:C.textSoft,letterSpacing:1.5,textTransform:"uppercase",marginBottom:4}}>Jan–{MONTHS[selectedMonth]} {YEAR-1}</div>
+              <div style={{fontSize:30,color:C.textMid}}>{compareData.slice(0,selectedMonth+1).reduce((a,d)=>a+d.prev,0)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ VIEW: MENSAL + ANUAL ══ */}
+      {view!=="compare" && (
+        <div style={{padding:"0 16px",display:"flex",flexDirection:"column",gap:6}}>
+          {items.map((item,idx)=>{
+            const monthVal=item.monthlyData[selectedMonth];
+            const yearVal =totalYear(item);
+            const maxMonth=Math.max(...item.monthlyData,1);
+            const expanded=expandedId===item.id;
+            const logEntries=entriesForMonth(item,selectedMonth);
+            const isPicking=pickingDate?.itemId===item.id;
+            const todayCount=entriesToday(item).length;
+
+            return(
+              <div key={item.id} style={{background:C.surface,borderRadius:10,border:`1.5px solid ${expanded?cat.color:C.border}`,boxShadow:expanded?`0 0 0 3px ${cat.colorBg}`:"0 1px 3px rgba(0,0,0,0.04)",overflow:"hidden",transition:"border .15s,box-shadow .15s"}}>
+
+                <div style={{padding:"13px 14px",display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{display:"flex",flexDirection:"column",gap:2,flexShrink:0}}>
+                    {[[-1,"▲"],[1,"▼"]].map(([dir,arrow])=>{
+                      const dis=dir===-1?idx===0:idx===items.length-1;
+                      return(
+                        <button key={dir} onClick={()=>moveItem(activeTab,idx,dir)} disabled={dis}
+                          style={{width:22,height:22,border:`1px solid ${dis?C.borderSoft:C.border}`,borderRadius:5,background:dis?"transparent":C.bg,color:dis?C.borderSoft:C.textSoft,cursor:dis?"default":"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
+                          {arrow}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <div style={{fontSize:15,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}</div>
+                      {todayCount>0&&<div style={{fontSize:10,padding:"1px 6px",borderRadius:10,background:cat.colorBg,color:cat.color,border:`1px solid ${cat.colorMuted}`,flexShrink:0}}>+{todayCount} hoje</div>}
+                    </div>
+                    <div style={{fontSize:12,color:C.textSoft,marginTop:2}}>
+                      {view==="month"?<>Ano: <strong style={{color:cat.color}}>{yearVal}</strong></>:<>Este mês: <strong style={{color:cat.color}}>{item.monthlyData[TODAY_M]}</strong></>}
+                    </div>
+                  </div>
+
+                  {view==="month"&&(
+                    <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+                      <button onClick={()=>setExpandedId(expanded?null:item.id)}
+                        style={{height:32,padding:"0 8px",borderRadius:6,background:expanded?cat.colorBg:C.bg,border:`1px solid ${expanded?cat.color:C.border}`,color:expanded?cat.color:C.textSoft,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontFamily:"Georgia,serif",whiteSpace:"nowrap"}}>
+                        📋 {monthVal}
+                      </button>
+                      <button onClick={()=>{if(isPicking){setPickingDate(null);return;} setPickedDate(todayISO()); setPickingDate({catKey:activeTab,itemId:item.id}); setExpandedId(item.id);}}
+                        style={{width:44,height:44,borderRadius:10,background:cat.colorBg,border:`2px solid ${cat.color}`,color:cat.color,fontSize:26,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:"bold"}}>
+                        +
+                      </button>
+                    </div>
+                  )}
+
+                  {view==="year"&&<div style={{fontSize:30,color:cat.color,minWidth:44,textAlign:"right",flexShrink:0}}>{yearVal}</div>}
+
+                  <button onClick={()=>removeItem(activeTab,item.id)}
+                    style={{width:22,height:22,background:"transparent",border:"none",color:C.textMuted,fontSize:17,cursor:"pointer",flexShrink:0,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                </div>
+
+                {view==="year"&&(
+                  <div style={{display:"flex",gap:2,padding:"0 14px 14px",alignItems:"flex-end",height:56}}>
+                    {item.monthlyData.map((v,i)=>(
+                      <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-end",gap:2}}>
+                        <div style={{width:"100%",borderRadius:2,minHeight:2,height:`${Math.round((v/maxMonth)*36)+2}px`,background:i===TODAY_M?cat.color:cat.colorMuted,opacity:i===TODAY_M?1:0.55}}/>
+                        <div style={{fontSize:8,color:i===TODAY_M?cat.color:C.textMuted}}>{MONTHS[i].slice(0,1)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {expanded&&view==="month"&&(
+                  <div style={{borderTop:`1px solid ${C.borderSoft}`,background:cat.colorBg}}>
+                    {isPicking&&(
+                      <div style={{padding:"12px 14px",borderBottom:`1px solid ${cat.colorMuted}44`}}>
+                        <div style={{fontSize:12,color:cat.color,fontWeight:"bold",marginBottom:8,letterSpacing:0.5}}>DATA DO REGISTRO</div>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <input type="date" value={pickedDate} max={todayISO()} onChange={e=>setPickedDate(e.target.value)}
+                            style={{flex:1,padding:"7px 10px",border:`1.5px solid ${cat.color}`,borderRadius:7,fontSize:14,fontFamily:"Georgia,serif",color:C.text,background:C.surface,outline:"none"}}/>
+                          <button onClick={()=>{if(!pickedDate)return; addEntry(activeTab,item.id,pickedDate); setPickingDate(null);}}
+                            style={{padding:"7px 16px",background:cat.color,border:"none",borderRadius:7,color:"#fff",fontSize:14,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:"bold",whiteSpace:"nowrap"}}>
+                            Confirmar
+                          </button>
+                          <button onClick={()=>setPickingDate(null)}
+                            style={{padding:"7px 10px",background:"transparent",border:`1px solid ${cat.colorMuted}`,borderRadius:7,color:cat.color,fontSize:13,cursor:"pointer"}}>✕</button>
+                        </div>
+                        {pickedDate&&<div style={{fontSize:11,color:cat.color,marginTop:6,opacity:0.8}}>{weekdayOf(pickedDate)}, {fmtDate(pickedDate)}</div>}
+                      </div>
+                    )}
+                    <div style={{padding:"10px 14px 12px"}}>
+                      <div style={{fontSize:11,color:cat.color,fontWeight:"bold",letterSpacing:0.5,marginBottom:8}}>REGISTROS EM {MONTHS[selectedMonth].toUpperCase()} · {logEntries.length}</div>
+                      {logEntries.length===0
+                        ?<div style={{fontSize:13,color:C.textMuted,padding:"6px 0"}}>Nenhum registro neste mês.</div>
+                        :<div style={{display:"flex",flexDirection:"column",gap:4}}>
+                          {logEntries.map((entry,ei)=>(
+                            <div key={entry.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.surface,borderRadius:7,border:`1px solid ${C.borderSoft}`}}>
+                              <div style={{width:6,height:6,borderRadius:"50%",background:cat.color,flexShrink:0}}/>
+                              <div style={{flex:1}}>
+                                <span style={{fontSize:14,color:C.text}}>{fmtDate(entry.date)}</span>
+                                <span style={{fontSize:12,color:C.textSoft,marginLeft:8}}>{weekdayOf(entry.date)}</span>
+                              </div>
+                              <div style={{fontSize:11,color:C.textMuted}}>#{logEntries.length-ei}</div>
+                              <button onClick={()=>removeEntry(activeTab,item.id,entry.id)}
+                                style={{width:20,height:20,background:"transparent",border:"none",color:C.textMuted,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>×</button>
+                            </div>
+                          ))}
+                        </div>
+                      }
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {addingNew?(
+            <div style={{background:C.surface,borderRadius:10,padding:"14px",border:`1px solid ${C.border}`}}>
+              <input autoFocus placeholder="Nome do item…" value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addItem(activeTab)}
+                style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,fontSize:15,padding:"8px 10px",fontFamily:"Georgia,serif",outline:"none",boxSizing:"border-box"}}/>
+              <div style={{display:"flex",gap:8,marginTop:10}}>
+                <button onClick={()=>addItem(activeTab)} style={{flex:1,padding:"8px",border:"none",borderRadius:6,background:cat.color,color:"#fff",fontSize:14,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:"bold"}}>Adicionar</button>
+                <button onClick={()=>{setAddingNew(false);setNewName("");}} style={{padding:"8px 16px",background:"transparent",border:`1px solid ${C.border}`,borderRadius:6,color:C.textSoft,fontSize:14,cursor:"pointer",fontFamily:"Georgia,serif"}}>Cancelar</button>
+              </div>
+            </div>
+          ):(
+            <button onClick={()=>setAddingNew(true)} style={{width:"100%",padding:"11px",background:"transparent",border:`1.5px dashed ${cat.colorMuted}`,borderRadius:10,fontSize:14,cursor:"pointer",fontFamily:"Georgia,serif",color:cat.color}}>
+              + Novo item
+            </button>
+          )}
+        </div>
+      )}
+
+      {toast&&(
+        <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:C.surface,color:cat.color,padding:"8px 20px",borderRadius:20,fontSize:13,border:`1px solid ${cat.colorMuted}`,boxShadow:"0 2px 12px rgba(0,0,0,0.10)",pointerEvents:"none",whiteSpace:"nowrap"}}>
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+<script>
+if("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(()=>{});
+  });
+}
+</script>
+</body>
+</html>
