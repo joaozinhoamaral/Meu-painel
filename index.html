@@ -361,6 +361,25 @@ function App(){
     showToast(`+1 em ${fmtDateFull(date)}`);
   };
 
+  // Adiciona N registros de uma vez numa única atualização de estado
+  const addEntries=(catKey,itemId,date,note,qty)=>{
+    haptic();
+    const m=monthOf(date);
+    const n=Math.max(1,qty||1);
+    updateItems(catKey,items=>items.map(it=>{
+      if(it.id!==itemId) return it;
+      const newEntries=Array.from({length:n},(_,i)=>({
+        id:`e_${Date.now()}_${i}_${Math.random().toString(36).slice(2)}`,
+        date,
+        note:(note||"").trim(),
+      }));
+      const entries=[...it.entries,...newEntries];
+      const monthlyData=it.monthlyData.map((v,i)=>i===m?v+n:v);
+      return {...it,entries,monthlyData};
+    }));
+    showToast(`+${n} em ${fmtDateFull(date)}`);
+  };
+
   const removeEntry=(catKey,itemId,entryId)=>{
     pushHistory(data);
     updateItems(catKey,items=>items.map(it=>{
@@ -883,7 +902,7 @@ function App(){
                         <button onClick={()=>{
                           if(!pickedDate) return;
                           const qty=Math.max(1,pickedQty||1);
-                          for(let i=0;i<qty;i++) addEntry(activeTab,item.id,pickedDate,pickedNote);
+                          addEntries(activeTab,item.id,pickedDate,pickedNote,qty);
                           setPickingFor(null); setPickedNote(""); setPickedQty(1);
                         }}
                           style={{width:"100%",padding:"9px",background:cat.color,border:"none",borderRadius:7,color:"#fff",fontSize:13,cursor:"pointer",fontWeight:"bold"}}>
